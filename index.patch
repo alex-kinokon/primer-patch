@@ -1,0 +1,1526 @@
+diff --git a/.gitignore b/.gitignore
+index 52284d40..2dd0846c 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,3 +1,4 @@
++repl.ts
+ .test
+ node_modules
+ .DS_Store
+diff --git a/esbuild.ts b/esbuild.ts
+new file mode 100644
+index 00000000..bf1b08c8
+--- /dev/null
++++ b/esbuild.ts
+@@ -0,0 +1,149 @@
++import fs from 'fs/promises'
++import {Plugin, build} from 'esbuild'
++import * as babel from '@babel/core'
++import babelPlugin from './script/babel-plugin'
++import prodPkg from './package-build'
++
++const patterns = [
++  [
++    "import styled from 'styled-components'", //
++    "import styled from '@emotion/styled';",
++  ],
++  [
++    "import {ThemeContext} from 'styled-components'", //
++    "import {ThemeContext} from '@emotion/react';",
++  ],
++  [
++    "import classnames from 'classnames'", //
++    "import { cx as classnames } from '@emotion/css';",
++  ],
++  [
++    "import merge from 'classnames'", //
++    "import { cx as merge } from '@emotion/css';",
++  ],
++  [
++    "import styled, {css} from 'styled-components'",
++    "import styled from '@emotion/styled';\nimport {css} from '@emotion/react';",
++  ],
++  [
++    "import styled, {keyframes} from 'styled-components'",
++    "import styled from '@emotion/styled';\nimport {keyframes} from '@emotion/react';",
++  ],
++  [
++    "import styled, {keyframes, css} from 'styled-components'",
++    "import styled from '@emotion/styled';\nimport {keyframes, css} from '@emotion/react';",
++  ],
++  [
++    "import {css} from 'styled-components'", //
++    "import {css} from '@emotion/react';",
++  ],
++  [
++    "import * as React from 'react'", //
++    'import React from "react"',
++  ],
++  [/\bstyled\.(\w+)\b/g, 'styled("$1")'],
++]
++
++const plugin: Plugin = {
++  name: 'plugin',
++  setup(build) {
++    build.onLoad({filter: /\.[jt]sx?$/}, async ({path}) => {
++      if (path.includes('node_modules')) {
++        return null
++      }
++
++      let code = await fs.readFile(path, 'utf8')
++      for (const [pattern, replacement] of patterns) {
++        code = code.replace(pattern, replacement as any)
++      }
++
++      const res = babel.transformSync(code, {
++        babelrc: false,
++        configFile: false,
++        filename: path,
++        parserOpts: {
++          plugins: ['jsx', 'typescript', 'classProperties'],
++        },
++        plugins: [
++          babelPlugin,
++          'add-react-displayname',
++          'dev-expression',
++          ['@emotion/babel-plugin', {sourceMap: false}],
++          [
++            'babel-plugin-transform-replace-expressions',
++            {
++              replace: {
++                __DEV__: "process.env.NODE_ENV !== 'production'",
++              },
++            },
++          ],
++        ].filter(Boolean),
++      })!
++
++      // if (path.includes('src/deprecated/Button/ButtonStyles')) {
++      //   console.log(res.code!)
++      // }
++
++      return {
++        contents: res.code!,
++        loader: 'default',
++      }
++    })
++  },
++}
++
++const excludes = Object.keys(prodPkg.dependencies)
++  .concat(Object.keys(prodPkg.peerDependencies))
++  .concat('react/jsx-runtime', '@emotion/styled/base')
++
++const alias: Plugin = {
++  name: 'alias',
++  setup(build) {
++    build.onLoad({filter: /object-assign/}, () => ({contents: 'export default Object.assign'}))
++
++    const primitive = require.resolve('@primer/primitives/dist/ts/index.ts')
++    build.onResolve({filter: /^@primer\/primitives$/}, () => ({path: primitive}))
++
++    const focusVisible = require.resolve('focus-visible/src/focus-visible.js')
++    build.onResolve({filter: /^focus-visible$/}, () => ({path: focusVisible}))
++  },
++}
++
++const included = new Set<string>()
++const excluded = new Set<string>()
++
++// Externalize all non-relative imports
++const external: Plugin = {
++  name: 'external',
++  setup(build) {
++    build.onResolve({filter: /^[^.\/].*/}, ({path}) => {
++      if (excludes.includes(path)) {
++        excluded.add(path)
++        return {path, external: true}
++      } else {
++        included.add(path)
++        return null
++      }
++    })
++  },
++}
++
++build({
++  bundle: true,
++  entryPoints: ['src/index.ts'],
++  outfile: 'dist/index.js',
++  format: 'esm',
++  target: 'esnext',
++  treeShaking: true,
++  banner: {
++    js: '/* eslint-disable */',
++  },
++  plugins: [plugin, alias, external],
++  metafile: true,
++  // minify: true,
++  sourcemap: 'linked',
++}).then(({metafile}) => {
++  fs.writeFile('dist/meta.json', JSON.stringify(metafile, null, 2))
++  console.log('included', [...included].sort())
++  console.log('excluded', [...excluded].sort())
++})
+diff --git a/package-build.ts b/package-build.ts
+new file mode 100644
+index 00000000..8ef53759
+--- /dev/null
++++ b/package-build.ts
+@@ -0,0 +1,60 @@
++/* spell-checker: disable */
++import {execSync} from 'child_process'
++import * as pkg from './package.json' assert {type: 'json'}
++
++const cache: Record<string, string> = {
++  '@emotion/css': '^11.11.0',
++  '@emotion/react': '^11.11.0',
++  '@emotion/styled': '^11.11.0',
++  '@github/combobox-nav': '^2.1.7',
++  '@github/relative-time-element': '^4.3.0',
++  '@lit-labs/react': '^1.1.1',
++  '@primer/behaviors': '^1.3.4',
++  '@primer/octicons-react': '^19.1.0',
++  '@primer/primitives': '^7.11.10',
++  '@react-aria/ssr': '^3.6.0',
++  '@styled-system/css': '^5.1.5',
++  '@styled-system/props': '^5.1.5',
++  '@styled-system/theme-get': '^5.1.2',
++  'chroma-js': '^2.4.2',
++  'react-dom': '^18.2.0',
++  'react-intersection-observer': '^9.4.3',
++  'styled-system': '^5.1.5',
++  color2k: '^2.0.2',
++  deepmerge: '^4.3.1',
++  history: '^5.3.0',
++  lodash: '^4.17.21',
++  react: '^18.2.0',
++}
++
++function getVersion(name: string) {
++  return '^' + execSync(`npm view ${name} version`).toString().trim()
++}
++function getDeps(list: string[]) {
++  return Object.fromEntries(list.map(name => [name, cache[name] ?? getVersion(name)]))
++}
++
++const res = {
++  name: pkg.name,
++  version: pkg.version,
++  license: pkg.license,
++  main: 'index.js',
++  type: 'module',
++  dependencies: getDeps([
++    '@lit-labs/react',
++    '@primer/octicons-react',
++    '@react-aria/ssr',
++    'chroma-js',
++    'history',
++    'color2k',
++    'deepmerge',
++    'react-intersection-observer',
++  ]),
++  peerDependencies: getDeps(['react', 'react-dom', '@emotion/styled', '@emotion/react', '@emotion/css', 'lodash']),
++}
++
++export default res
++
++if (require.main === module) {
++  console.log(JSON.stringify(res, null, 2))
++}
+diff --git a/package.json b/package.json
+index d744fbc5..18fe338c 100644
+--- a/package.json
++++ b/package.json
+@@ -34,6 +34,7 @@
+   "scripts": {
+     "setup": "./script/setup",
+     "build": "./script/build",
++    "build:patch": "git diff --staged . ':(exclude).vscode/settings.json' ':(exclude)package-lock.json' > primer-patch/index.patch",
+     "clean": "rimraf dist lib lib-esm css",
+     "format": "prettier --cache --write '**/*.{js,md,mdx,ts,tsx,yml}'",
+     "format:diff": "prettier --cache --list-different '**/*.{js.md,mdx,ts,tsx,yml}'",
+@@ -56,8 +57,7 @@
+     "test:coverage": "npm run test -- --coverage",
+     "test:type-check": "tsc --noEmit",
+     "release": "npm run build && changeset publish",
+-    "size": "size-limit",
+-    "prepare": "husky install"
++    "size": "size-limit"
+   },
+   "repository": "primer/react",
+   "keywords": [
+@@ -89,168 +89,44 @@
+     "npm": ">=7"
+   },
+   "dependencies": {
+-    "@github/combobox-nav": "^2.1.5",
+-    "@github/markdown-toolbar-element": "^2.1.0",
+-    "@github/paste-markdown": "^1.4.0",
+-    "@github/relative-time-element": "^4.1.2",
+-    "@lit-labs/react": "1.1.1",
++    "@github/combobox-nav": "2.1.7",
++    "@github/relative-time-element": "4.3.0",
+     "@primer/behaviors": "1.3.4",
+-    "@primer/octicons-react": "^18.0.0",
+-    "@primer/primitives": "7.11.10",
+-    "@react-aria/ssr": "^3.1.0",
+-    "@styled-system/css": "^5.1.5",
+-    "@styled-system/props": "^5.1.5",
+-    "@styled-system/theme-get": "^5.1.2",
+-    "@types/styled-components": "^5.1.11",
+-    "@types/styled-system": "^5.1.12",
+-    "@types/styled-system__css": "^5.0.16",
+-    "@types/styled-system__theme-get": "^5.0.1",
+-    "classnames": "^2.3.1",
+-    "color2k": "^2.0.0",
++    "@styled-system/props": "5.1.5",
++    "@styled-system/theme-get": "5.1.2",
+     "deepmerge": "^4.2.2",
+     "focus-visible": "^5.2.0",
+-    "fzy.js": "0.4.1",
+-    "history": "^5.0.0",
+-    "react-intersection-observer": "9.4.3",
+     "styled-system": "^5.1.5"
+   },
+   "devDependencies": {
+-    "@actions/core": "1.10.0",
+-    "@babel/cli": "7.21.0",
+-    "@babel/core": "7.21.0",
+-    "@babel/eslint-parser": "7.21.3",
+-    "@babel/plugin-proposal-nullish-coalescing-operator": "7.18.6",
+-    "@babel/plugin-proposal-optional-chaining": "7.21.0",
+-    "@babel/plugin-transform-modules-commonjs": "7.21.2",
++    "@babel/core": "7.21.8",
+     "@babel/preset-react": "7.18.6",
+     "@babel/preset-typescript": "7.21.0",
+-    "@changesets/changelog-github": "0.4.8",
+-    "@changesets/cli": "2.26.0",
+-    "@github/markdownlint-github": "^0.3.0",
++    "@emotion/babel-plugin": "11.11.0",
++    "@emotion/css": "11.11.0",
++    "@emotion/react": "11.11.0",
++    "@emotion/styled": "11.11.0",
+     "@github/prettier-config": "0.0.6",
+-    "@playwright/test": "1.32.0",
+-    "@primer/css": "^21.0.1",
+-    "@rollup/plugin-babel": "6.0.3",
+-    "@rollup/plugin-commonjs": "25.0.0",
+-    "@rollup/plugin-node-resolve": "15.0.2",
+-    "@rollup/plugin-replace": "5.0.2",
+-    "@rollup/plugin-terser": "0.4.0",
+-    "@rollup/plugin-typescript": "11.1.0",
+-    "@rollup/plugin-virtual": "3.0.1",
+-    "@size-limit/preset-big-lib": "8.2.4",
+-    "@storybook/addon-a11y": "6.5.16",
+-    "@storybook/addon-actions": "6.5.16",
+-    "@storybook/addon-essentials": "6.5.16",
+-    "@storybook/addon-interactions": "6.5.14",
+-    "@storybook/addon-links": "6.5.16",
+-    "@storybook/addon-storysource": "6.5.14",
+-    "@storybook/builder-webpack5": "6.5.16",
+-    "@storybook/jest": "0.0.10",
+-    "@storybook/manager-webpack5": "6.5.14",
+-    "@storybook/react": "6.5.16",
+-    "@storybook/test-runner": "0.10.0",
+-    "@storybook/testing-library": "0.0.13",
+-    "@storybook/theming": "6.5.16",
+-    "@testing-library/dom": "9.2.0",
+-    "@testing-library/jest-dom": "5.16.5",
+-    "@testing-library/react": "14.0.0",
+-    "@testing-library/react-hooks": "7.0.2",
+-    "@testing-library/user-event": "^14.3.0",
+-    "@types/chroma-js": "2.4.0",
+-    "@types/jest": "29.4.0",
+-    "@types/jest-axe": "3.5.5",
+-    "@types/lodash.groupby": "4.6.7",
+-    "@types/lodash.isempty": "4.4.7",
+-    "@types/lodash.isobject": "3.0.7",
+-    "@types/lodash.keyby": "4.6.7",
++    "@primer/primitives": "7.11.10",
+     "@types/node": "16.11.11",
+     "@types/react": "18.0.28",
+     "@types/react-dom": "18.0.9",
+-    "@typescript-eslint/eslint-plugin": "5.54.1",
+-    "@typescript-eslint/parser": "5.54.1",
+-    "ajv": "8.12.0",
+-    "axe-core": "4.7.0",
+-    "babel-core": "7.0.0-bridge.0",
+-    "babel-loader": "^9.1.0",
+     "babel-plugin-add-react-displayname": "0.0.5",
+     "babel-plugin-dev-expression": "0.2.3",
+-    "babel-plugin-macros": "3.1.0",
+-    "babel-plugin-open-source": "1.3.4",
+     "babel-plugin-styled-components": "2.1.1",
+     "babel-plugin-transform-replace-expressions": "0.2.0",
+-    "babel-polyfill": "6.26.0",
+-    "change-case": "4.1.2",
+     "chroma-js": "2.4.2",
+-    "chromatic": "6.1.0",
+-    "concurrently": "8.0.1",
+     "copyfiles": "2.4.1",
+-    "cross-env": "7.0.3",
++    "esbuild": "0.17.19",
++    "esbuild-register": "3.4.2",
+     "eslint": "8.40.0",
+-    "eslint-import-resolver-typescript": "3.5.3",
+-    "eslint-plugin-github": "4.6.1",
+-    "eslint-plugin-jest": "27.2.1",
+-    "eslint-plugin-jsx-a11y": "6.7.1",
+-    "eslint-plugin-mdx": "2.0.5",
+-    "eslint-plugin-playwright": "0.12.0",
+-    "eslint-plugin-prettier": "4.2.1",
+-    "eslint-plugin-primer-react": "2.0.3",
+-    "eslint-plugin-react": "7.32.2",
+-    "eslint-plugin-react-hooks": "4.6.0",
+-    "eslint-plugin-ssr-friendly": "1.2.0",
+-    "eslint-plugin-storybook": "0.6.11",
+-    "eslint-plugin-testing-library": "5.10.2",
+-    "fast-glob": "3.2.12",
+-    "filesize": "10.0.6",
+-    "front-matter": "4.0.2",
+-    "gzip-size": "6.0.0",
+-    "husky": "8.0.2",
+-    "jest": "29.4.2",
+-    "jest-axe": "7.0.1",
+-    "jest-css-modules": "2.1.0",
+-    "jest-environment-jsdom": "29.4.3",
+-    "jest-fail-on-console": "3.1.1",
+-    "jest-matchmedia-mock": "1.1.0",
+-    "jest-styled-components": "6.3.4",
+-    "jest-watch-typeahead": "2.2.2",
+-    "jscodeshift": "0.14.0",
+-    "lint-staged": "13.1.0",
+-    "lodash.groupby": "4.6.0",
+-    "lodash.isempty": "4.4.0",
+-    "lodash.isobject": "3.0.2",
+-    "lodash.keyby": "4.6.0",
+-    "markdownlint-cli2": "^0.7.1",
+-    "markdownlint-cli2-formatter-pretty": "0.0.3",
+-    "mdast-util-from-markdown": "1.3.0",
+-    "mdast-util-frontmatter": "1.0.1",
+-    "mdast-util-mdx": "2.0.1",
+-    "mdast-util-to-string": "3.1.1",
+-    "micromark-extension-frontmatter": "1.0.0",
+-    "micromark-extension-mdxjs": "1.0.0",
+-    "prettier": "2.8.1",
+-    "react": "18.2.0",
+-    "react-dnd": "14.0.4",
+-    "react-dnd-html5-backend": "14.0.2",
+-    "react-dom": "18.2.0",
+-    "react-test-renderer": "18.2.0",
+-    "recast": "0.22.0",
++    "lodash-es": "4.17.21",
++    "quicktype": "23.0.30",
+     "rimraf": "4.1.2",
+-    "rollup": "3.20.2",
+-    "rollup-plugin-postcss": "4.0.2",
+-    "rollup-plugin-visualizer": "5.9.0",
+-    "semver": "7.5.0",
+-    "size-limit": "8.2.4",
+-    "storybook-addon-turbo-build": "1.1.0",
+-    "storybook-css-modules": "1.0.8",
+-    "styled-components": "4.4.1",
+-    "terser": "5.16.1",
+-    "ts-node": "10.9.1",
+-    "ts-toolbelt": "9.6.0",
+-    "typescript": "4.9.5",
+-    "unist-util-find": "1.0.2",
+-    "unist-util-find-before": "3.0.1",
+-    "unist-util-flat-filter": "2.0.0",
+-    "webpack": "5.82.1",
+-    "yaml": "2.2.2"
++    "typescript": "5.0.4"
++  },
++  "resolutions": {
++    "typescript": "5.0.4"
+   },
+   "peerDependencies": {
+     "react": "^17.0.0 || ^18.0.0",
+diff --git a/script/babel-plugin.ts b/script/babel-plugin.ts
+new file mode 100644
+index 00000000..d5031186
+--- /dev/null
++++ b/script/babel-plugin.ts
+@@ -0,0 +1,95 @@
++import type * as babel from '@babel/core'
++import type * as t from '@babel/types'
++import * as url from 'url'
++import {resolve} from 'path'
++
++interface State extends babel.PluginPass {
++  attrImport?: string
++}
++
++var __dirname = url.fileURLToPath(new URL('.', import.meta.url))
++const attrsPath = resolve(__dirname, '../src/attrs.tsx')
++
++export default ({types: t}: typeof babel): babel.PluginObj<State> => {
++  const visitor: babel.Visitor<State> = {
++    TaggedTemplateExpression(expPath, state) {
++      const {node} = expPath
++      let hasGet = false
++
++      // First: fix interpolating functions inside css` and styled` in emotion.
++      const {expressions} = node.quasi
++      for (const [i, exp] of expressions.entries()) {
++        if (!t.isCallExpression(exp)) continue
++        if ((exp.callee as t.Identifier).name !== 'get' || exp.arguments.length !== 1) continue
++
++        const [arg] = exp.arguments
++        if (!t.isStringLiteral(arg)) continue
++
++        let scopeHasProps = expPath.scope.hasBinding('props')
++        if (!hasGet) {
++          hasGet = true
++          if (t.isIdentifier(node.tag, {name: 'css'})) {
++            if (t.isVariableDeclarator(expPath.parent)) {
++              expPath.parent.init = t.arrowFunctionExpression([t.identifier('props')], node)
++              scopeHasProps = true
++            } else if (t.isExportDefaultDeclaration(expPath.parent)) {
++              expPath.parent.declaration = t.arrowFunctionExpression([t.identifier('props')], node)
++              scopeHasProps = true
++            }
++          }
++        }
++
++        const path = arg.value.split('.')
++
++        let value = t.memberExpression(t.identifier('props'), t.identifier('theme'))
++        for (let i = 0; i < path.length; i++) {
++          value = t.memberExpression(value, t.identifier(path[i]), /^\d+/.test(path[i]))
++        }
++
++        expressions[i] = scopeHasProps ? value : t.arrowFunctionExpression([t.identifier('props')], value)
++      }
++
++      // Second: rewire attrs calls
++      if (t.isCallExpression(node.tag)) {
++        const {callee, arguments: args} = node.tag
++
++        if (
++          t.isMemberExpression(callee) &&
++          t.isCallExpression(callee.object) &&
++          t.isIdentifier(callee.object.callee, {
++            name: 'styled',
++          }) &&
++          callee.object.arguments.length === 1 &&
++          t.isIdentifier(callee.property, {
++            name: 'attrs',
++          })
++        ) {
++          if (!state.attrImport) {
++            const uid = expPath.scope.generateUidIdentifier('attrs')
++            ;(expPath.findParent(p => p.isProgram())! as babel.NodePath<t.Program>).unshiftContainer(
++              'body',
++              t.importDeclaration([t.importSpecifier(uid, t.identifier('attrs'))], t.stringLiteral(attrsPath)),
++            )
++            state.attrImport = uid.name
++          }
++
++          expPath.replaceWith(
++            t.callExpression(t.identifier(state.attrImport), [
++              args[0],
++              t.taggedTemplateExpression(callee.object, node.quasi),
++            ]),
++          )
++        }
++      }
++    },
++  }
++
++  return {
++    name: 'css',
++    visitor: {
++      Program(programPath, state) {
++        programPath.traverse(visitor, state)
++      },
++    },
++  }
++}
+diff --git a/script/build b/script/build
+index ba0d72b0..0653d253 100755
+--- a/script/build
++++ b/script/build
+@@ -1,18 +1,27 @@
+ #!/bin/bash
+-
+-set -e
++export DEV=false
+ 
+ # Clean up
+ npm run clean
+ 
+ # Bundle
+-npx rollup -c --bundleConfigAsCjs
++node -r esbuild-register esbuild.ts
+ 
+ # Type check
+-npx tsc --project tsconfig.build.json
++if [ "$DEV" != true ]; then
++  node -e 'require("esbuild-register");console.log(JSON.stringify(require("./src/theme").default))' \
++  | npx quicktype --lang ts --top-level ThemeData --just-types --prefer-unions --telemetry disable \
++  | npx prettier --stdin-filepath a.ts \
++  > ./src/theme-def.ts
++  npx tsc --project tsconfig.build.json &>/dev/null
++fi
++
++# Build package.json
++node -r esbuild-register package-build.ts > dist/package.json
+ 
+ # Copy type declarations
+-npx copyfiles -u 1 "./lib/**/*.d.ts" ./lib-esm
++npx copyfiles -u 1 "./lib/**/*.d.ts" ./dist
++rm -rf lib
+ 
+ # Copy css
+ npx copyfiles --flat ./lib/components.css ./css
+diff --git a/src/BaseStyles.tsx b/src/BaseStyles.tsx
+index c7f1758f..d2849eb1 100644
+--- a/src/BaseStyles.tsx
++++ b/src/BaseStyles.tsx
+@@ -1,5 +1,6 @@
+ import React from 'react'
+-import styled, {createGlobalStyle} from 'styled-components'
++import styled from 'styled-components'
++import {css, Global} from '@emotion/react'
+ import {COMMON, SystemCommonProps, SystemTypographyProps, TYPOGRAPHY} from './constants'
+ import {useTheme, defaultColorMode, ColorModeWithAuto} from './ThemeProvider'
+ import {ComponentProps} from './utils/types'
+@@ -7,11 +8,10 @@ import {ComponentProps} from './utils/types'
+ // load polyfill for :focus-visible
+ import 'focus-visible'
+ 
+-const GlobalStyle = createGlobalStyle<{colorScheme?: 'light' | 'dark'}>`
++const globalStyle = css`
+   * { box-sizing: border-box; }
+   body { margin: 0; }
+   table { border-collapse: collapse; }
+-  input { color-scheme: ${props => props.colorScheme}; }
+ 
+   [role="button"]:focus:not(:focus-visible):not(.focus-visible),
+   [role="tabpanel"][tabindex="0"]:focus:not(:focus-visible):not(.focus-visible),
+@@ -57,15 +57,21 @@ function BaseStyles(props: BaseStylesProps) {
+   return (
+     <Base
+       {...rest}
+-      color={color}
+-      fontFamily={fontFamily}
+-      lineHeight={lineHeight}
+       data-portal-root
+       data-color-mode={primerColorModeToPrimitiveColorMode[colorMode || defaultColorMode]}
+       data-light-theme={dayScheme}
+       data-dark-theme={nightScheme}
+     >
+-      <GlobalStyle colorScheme={colorScheme?.includes('dark') ? 'dark' : 'light'} />
++      <Global
++        styles={[
++          globalStyle,
++          css`
++            input {
++              color-scheme: ${colorScheme?.includes('dark') ? 'dark' : 'light'};
++            }
++          `,
++        ]}
++      />
+       {children}
+     </Base>
+   )
+diff --git a/src/Dialog.tsx b/src/Dialog.tsx
+index 2df90952..15f1fe67 100644
+--- a/src/Dialog.tsx
++++ b/src/Dialog.tsx
+@@ -56,7 +56,7 @@ export type DialogHeaderProps = ComponentProps<typeof DialogHeaderBase>
+ function DialogHeader({theme, children, backgroundColor = 'canvas.subtle', ...rest}: DialogHeaderProps) {
+   if (React.Children.toArray(children).every(ch => typeof ch === 'string')) {
+     children = (
+-      <Text theme={theme} color="fg.default" fontSize={1} fontWeight="bold" fontFamily="sans-serif">
++      <Text theme={theme} color="fg.default" fontSize={1} fontWeight="bold">
+         {children}
+       </Text>
+     )
+diff --git a/src/PageLayout/PageLayout.tsx b/src/PageLayout/PageLayout.tsx
+index b4c89fd7..3e2debad 100644
+--- a/src/PageLayout/PageLayout.tsx
++++ b/src/PageLayout/PageLayout.tsx
+@@ -1,5 +1,5 @@
+ import React from 'react'
+-import {createGlobalStyle} from 'styled-components'
++import {Global, css} from '@emotion/react'
+ import Box from '../Box'
+ import {useId} from '../hooks/useId'
+ import {useRefObjectAsForwardedRef} from '../hooks/useRefObjectAsForwardedRef'
+@@ -202,7 +202,7 @@ type DraggableDividerProps = {
+   onDoubleClick?: () => void
+ }
+ 
+-const DraggingGlobalStyles = createGlobalStyle`
++const draggingGlobalStyles = css`
+   /* Maintain resize cursor while dragging */
+   body[data-page-layout-dragging="true"] {
+     cursor: col-resize;
+@@ -299,7 +299,7 @@ const VerticalDivider: React.FC<React.PropsWithChildren<DividerProps & Draggable
+             }}
+             onDoubleClick={onDoubleClick}
+           />
+-          <DraggingGlobalStyles />
++          <Global styles={draggingGlobalStyles} />
+         </>
+       ) : null}
+     </Box>
+diff --git a/src/ThemeProvider.tsx b/src/ThemeProvider.tsx
+index eb6df2e7..6bd69a68 100644
+--- a/src/ThemeProvider.tsx
++++ b/src/ThemeProvider.tsx
+@@ -1,15 +1,19 @@
+ import React from 'react'
+ import ReactDOM from 'react-dom'
+-import {ThemeProvider as SCThemeProvider} from 'styled-components'
++import {ThemeProvider as SCThemeProvider} from '@emotion/react'
+ import defaultTheme from './theme'
+ import deepmerge from 'deepmerge'
++import type {ThemeData, Colors, Shadows} from './theme-def'
+ 
+ export const defaultColorMode = 'day'
+ const defaultDayScheme = 'light'
+ const defaultNightScheme = 'dark'
+ 
+-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+-export type Theme = {[key: string]: any}
++export type Theme = ThemeData & {
++  colors: Colors
++  shadows: Shadows
++  default: ThemeData
++}
+ type ColorMode = 'day' | 'night' | 'light' | 'dark'
+ export type ColorModeWithAuto = ColorMode | 'auto'
+ 
+diff --git a/src/_TextInputWrapper.tsx b/src/_TextInputWrapper.tsx
+index 5af6ff7d..4c388e69 100644
+--- a/src/_TextInputWrapper.tsx
++++ b/src/_TextInputWrapper.tsx
+@@ -70,7 +70,7 @@ export type StyledWrapperProps = {
+ const textInputBasePadding = '12px'
+ export const textInputHorizPadding = textInputBasePadding
+ 
+-const renderFocusStyles = (hasTrailingAction: boolean, isInputFocused: boolean) => {
++const renderFocusStyles = (props, hasTrailingAction: boolean, isInputFocused: boolean) => {
+   if (hasTrailingAction) {
+     return (
+       isInputFocused &&
+@@ -117,7 +117,7 @@ export const TextInputBaseWrapper = styled.span<StyledBaseWrapperProps>`
+     color: ${get('colors.fg.subtle')};
+   }
+ 
+-  ${props => renderFocusStyles(Boolean(props.hasTrailingAction), Boolean(props.isInputFocused))}
++  ${props => renderFocusStyles(props, Boolean(props.hasTrailingAction), Boolean(props.isInputFocused))}
+ 
+   > textarea {
+     padding: ${textInputBasePadding};
+@@ -153,7 +153,7 @@ export const TextInputBaseWrapper = styled.span<StyledBaseWrapperProps>`
+     props.validationStatus === 'error' &&
+     css`
+       border-color: ${get('colors.danger.emphasis')};
+-      ${renderFocusStyles(Boolean(props.hasTrailingAction), Boolean(props.isInputFocused))}
++      ${renderFocusStyles(props, Boolean(props.hasTrailingAction), Boolean(props.isInputFocused))}
+     `}
+ 
+ 
+@@ -215,7 +215,7 @@ const TextInputWrapper = styled(TextInputBaseWrapper)<StyledWrapperProps>`
+     props.validationStatus === 'warning' &&
+     css`
+       border-color: ${get('colors.attention.emphasis')};
+-      ${renderFocusStyles(Boolean(props.hasTrailingAction), Boolean(props.isInputFocused))}
++      ${renderFocusStyles(props, Boolean(props.hasTrailingAction), Boolean(props.isInputFocused))}
+     `}
+ 
+   ${sx};
+diff --git a/src/_getGlobalFocusStyles.ts b/src/_getGlobalFocusStyles.ts
+index e3969bdd..073725c0 100644
+--- a/src/_getGlobalFocusStyles.ts
++++ b/src/_getGlobalFocusStyles.ts
+@@ -7,23 +7,24 @@ const globalFocusStyle = css`
+   outline: 2px solid ${get('colors.accent.fg')};
+ `
+ 
+-const getGlobalFocusStyles = (outlineOffset?: CSSProperties['outlineOffset']) => css`
+-  /* fallback :focus state */
+-  &:focus:not(:disabled) {
+-    ${globalFocusStyle};
+-    outline-offset: ${typeof outlineOffset === 'undefined' ? '2px' : outlineOffset};
++const getGlobalFocusStyles = (outlineOffset?: CSSProperties['outlineOffset']) => props =>
++  css`
++    /* fallback :focus state */
++    &:focus:not(:disabled) {
++      ${globalFocusStyle(props)};
++      outline-offset: ${typeof outlineOffset === 'undefined' ? '2px' : outlineOffset};
+ 
+-    // remove fallback :focus if :focus-visible is supported
+-    &:not(:focus-visible) {
+-      outline: solid 1px transparent;
++      // remove fallback :focus if :focus-visible is supported
++      &:not(:focus-visible) {
++        outline: solid 1px transparent;
++      }
+     }
+-  }
+ 
+-  /* default focus state */
+-  &:focus-visible:not(:disabled) {
+-    ${globalFocusStyle};
+-    outline-offset: ${typeof outlineOffset === 'undefined' ? '2px' : outlineOffset};
+-  }
+-`
++    /* default focus state */
++    &:focus-visible:not(:disabled) {
++      ${globalFocusStyle(props)};
++      outline-offset: ${typeof outlineOffset === 'undefined' ? '2px' : outlineOffset};
++    }
++  `
+ 
+ export default getGlobalFocusStyles
+diff --git a/src/attrs.tsx b/src/attrs.tsx
+new file mode 100644
+index 00000000..03ea1191
+--- /dev/null
++++ b/src/attrs.tsx
+@@ -0,0 +1,20 @@
++// https://github.com/emotion-js/emotion/issues/821#issuecomment-1383053710
++import type {ComponentRef, ComponentType} from 'react'
++import React, {forwardRef} from 'react'
++
++type Defaultize<P extends {}, Q extends Partial<P>> = Omit<P, keyof Q> & Partial<Pick<P, keyof Q & keyof P>>
++
++export function attrs<P extends {}, Q extends Partial<P>>(
++  propsFactory: Q | ((props: Defaultize<P, Q>) => Q),
++  Component: ComponentType<P>,
++) {
++  return forwardRef<ComponentRef<ComponentType<P>>, Defaultize<P, Q>>((props, ref) => {
++    return (
++      <Component
++        {...(props as P)}
++        {...(typeof propsFactory === 'function' ? propsFactory(props) : propsFactory)}
++        ref={ref}
++      />
++    )
++  })
++}
+diff --git a/src/constants.ts b/src/constants.ts
+index 998111c4..b12e21f1 100644
+--- a/src/constants.ts
++++ b/src/constants.ts
+@@ -1,15 +1,14 @@
+ import {themeGet} from '@styled-system/theme-get'
+ // eslint-disable-next-line import/no-namespace
+-import * as styledSystem from 'styled-system'
++import type * as styledSystem from 'styled-system'
++import {get as getKey, compose, system, space, color, display, typography, border, shadow, layout} from 'styled-system'
+ import theme from './theme'
+ 
+-const {get: getKey, compose, system} = styledSystem
+-
+ export const get = (key: string) => themeGet(key, getKey(theme, key))
+ 
+ // Common props
+ 
+-export const COMMON = compose(styledSystem.space, styledSystem.color, styledSystem.display)
++export const COMMON = compose(space, color, display)
+ 
+ export interface SystemCommonProps
+   extends styledSystem.ColorProps,
+@@ -25,7 +24,7 @@ const whiteSpace = system({
+   },
+ })
+ 
+-export const TYPOGRAPHY = compose(styledSystem.typography, whiteSpace)
++export const TYPOGRAPHY = compose(typography, whiteSpace)
+ 
+ export interface SystemTypographyProps extends styledSystem.TypographyProps {
+   whiteSpace?: 'normal' | 'nowrap' | 'pre' | 'pre-wrap' | 'pre-line'
+@@ -33,12 +32,12 @@ export interface SystemTypographyProps extends styledSystem.TypographyProps {
+ 
+ // Border props
+ 
+-export const BORDER = compose(styledSystem.border, styledSystem.shadow)
++export const BORDER = compose(border, shadow)
+ 
+ export interface SystemBorderProps extends styledSystem.BorderProps, styledSystem.ShadowProps {}
+ 
+ // Layout props
+ 
+-export const LAYOUT = styledSystem.layout
++export {layout as LAYOUT}
+ 
+ export type SystemLayoutProps = styledSystem.LayoutProps
+diff --git a/src/styled-components.d.ts b/src/styled-components.d.ts
+new file mode 100644
+index 00000000..790497de
+--- /dev/null
++++ b/src/styled-components.d.ts
+@@ -0,0 +1,4 @@
++declare module 'styled-components' {
++  export {default} from '@emotion/styled'
++  export {css} from '@emotion/react'
++}
+diff --git a/src/theme-def.ts b/src/theme-def.ts
+new file mode 100644
+index 00000000..c71e982f
+--- /dev/null
++++ b/src/theme-def.ts
+@@ -0,0 +1,595 @@
++export interface ThemeData {
++  animation: Animation
++  borderWidths: Array<number | string>
++  breakpoints: string[]
++  fonts: Fonts
++  fontSizes: string[]
++  fontWeights: FontWeights
++  lineHeights: LineHeights
++  radii: string[]
++  sizes: Sizes
++  space: string[]
++  colorSchemes: ColorSchemes
++}
++
++export interface Animation {
++  easeOutCubic: string
++}
++
++export interface ColorSchemes {
++  light: Dark
++  light_high_contrast: Dark
++  light_colorblind: Dark
++  light_tritanopia: Dark
++  dark: Dark
++  dark_dimmed: Dark
++  dark_high_contrast: Dark
++  dark_colorblind: Dark
++  dark_tritanopia: Dark
++}
++
++export interface Dark {
++  colors: Colors
++  shadows: Shadows
++}
++
++export interface Colors {
++  canvasDefaultTransparent: string
++  pageHeaderBg: PageHeaderBg
++  marketingIcon: MarketingIcon
++  diffBlob: DiffBlob
++  diffstat: Diffstat
++  searchKeyword: SearchKeyword
++  prettylights: Prettylights
++  codemirror: Codemirror
++  checks: ColorsChecks
++  project: Project
++  mktg: ColorsMktg
++  control: Control
++  avatar: ColorsAvatar
++  topicTag: Counter
++  counter: Counter
++  selectMenu: SelectMenu
++  header: Header
++  headerSearch: HeaderSearch
++  sidenav: Sidenav
++  menu: Menu
++  input: Input
++  timeline: Timeline
++  ansi: ANSI
++  btn: ColorsBtn
++  underlinenav: Underlinenav
++  actionListItem: ActionListItem
++  switchTrack: SwitchTrack
++  switchKnob: SwitchKnob
++  segmentedControl: SegmentedControl
++  treeViewItem: TreeViewItem
++  fg: FgClass
++  canvas: ColorsCanvas
++  border: FgClass
++  neutral: Accent
++  accent: Accent
++  success: Accent
++  attention: Accent
++  severe: Accent
++  danger: Accent
++  open: Accent
++  closed: Accent
++  done: Accent
++  sponsors: Accent
++  primer: ColorsPrimer
++}
++
++export interface Accent {
++  fg?: string
++  emphasis: string
++  muted: string
++  subtle: string
++  emphasisPlus?: string
++}
++
++export interface ActionListItem {
++  inlineDivider: string
++  default: Default
++  danger: ActionListItemDanger
++}
++
++export interface ActionListItemDanger {
++  hoverBg: string
++  activeBg: string
++  hoverText: string
++}
++
++export interface Default {
++  hoverBg: string
++  hoverBorder: string
++  activeBg: string
++  activeBorder: string
++  selectedBg: string
++}
++
++export interface ANSI {
++  black: string
++  blackBright: string
++  white: string
++  whiteBright: string
++  gray: string
++  red: string
++  redBright: string
++  green: string
++  greenBright: string
++  yellow: string
++  yellowBright: string
++  blue: string
++  blueBright: string
++  magenta: string
++  magentaBright: string
++  cyan: Cyan
++  cyanBright: CyanBright
++}
++
++export type Cyan = '#39c5cf' | '#76e3ea' | '#1b7c83'
++
++export type CyanBright = '#56d4dd' | '#b3f0ff' | '#3192aa'
++
++export interface ColorsAvatar {
++  bg: string
++  border: string
++  stackFade: string
++  stackFadeMore: string
++}
++
++export interface FgClass {
++  default: string
++  muted: string
++  subtle: string
++  onEmphasis?: string
++}
++
++export interface ColorsBtn {
++  text: string
++  bg: string
++  border: string
++  hoverBg: string
++  hoverBorder: string
++  activeBg: string
++  activeBorder: string
++  selectedBg: string
++  counterBg: string
++  primary: PurplePrimary
++  outline: PurpleDanger
++  danger: PurpleDanger
++}
++
++export interface PurpleDanger {
++  text: string
++  hoverText: string
++  hoverBg: string
++  hoverBorder: string
++  hoverIcon?: string
++  hoverCounterBg: string
++  selectedText: SelectedText
++  selectedBg: string
++  selectedBorder: string
++  disabledText: string
++  disabledBg: string
++  disabledCounterBg: string
++  counterBg: string
++  icon?: string
++  counterFg: string
++  disabledCounterFg: string
++  hoverCounterFg: string
++}
++
++export type SelectedText = '#ffffff' | '#cdd9e5'
++
++export interface PurplePrimary {
++  text: PageHeaderBg
++  bg: string
++  border: string
++  hoverBg: string
++  hoverBorder: string
++  selectedBg: string
++  disabledText: string
++  disabledBg: string
++  disabledBorder: string
++  icon: string
++  counterBg: string
++}
++
++export type PageHeaderBg = '#0d1117' | '#22272e' | '#0a0c10' | '#ffffff' | '#f6f8fa'
++
++export interface ColorsCanvas {
++  default: PageHeaderBg
++  overlay: string
++  inset: Inset
++  subtle: string
++}
++
++export type Inset = '#010409' | '#1c2128' | '#ffffff' | '#f6f8fa'
++
++export interface ColorsChecks {
++  bg: string
++  textPrimary: string
++  textSecondary: string
++  textLink: string
++  btnIcon: string
++  btnHoverIcon: string
++  btnHoverBg: string
++  inputText: string
++  inputPlaceholderText: string
++  inputFocusText: string
++  inputBg: string
++  donutError: string
++  donutPending: string
++  donutSuccess: string
++  donutNeutral: string
++  dropdownText: string
++  dropdownBg: string
++  dropdownBorder: string
++  dropdownShadow: string
++  dropdownHoverText: string
++  dropdownHoverBg: string
++  dropdownBtnHoverText: string
++  dropdownBtnHoverBg: string
++  scrollbarThumbBg: string
++  headerLabelText: string
++  headerLabelOpenText: string
++  headerBorder: string
++  headerIcon: string
++  lineText: string
++  lineNumText: string
++  lineTimestampText: string
++  lineHoverBg: string
++  lineSelectedBg: string
++  lineSelectedNumText: string
++  lineDtFmText: string
++  lineDtFmBg: string
++  gateBg: string
++  gateText: string
++  gateWaitingText: string
++  stepHeaderOpenBg: string
++  stepErrorText: string
++  stepWarningText: string
++  loglineText: string
++  loglineNumText: string
++  loglineDebugText: string
++  loglineErrorText: string
++  loglineErrorNumText: string
++  loglineErrorBg: string
++  loglineWarningText: string
++  loglineWarningNumText: string
++  loglineWarningBg: string
++  loglineCommandText: string
++  loglineSectionText: string
++  ansi: ANSI
++}
++
++export interface Codemirror {
++  text: string
++  bg: PageHeaderBg
++  guttersBg: PageHeaderBg
++  guttermarkerText: PageHeaderBg
++  guttermarkerSubtleText: string
++  linenumberText: string
++  cursor: string
++  selectionBg: string
++  activelineBg: string
++  matchingbracketText: string
++  linesBg: PageHeaderBg
++  syntax: CodemirrorSyntax
++}
++
++export interface CodemirrorSyntax {
++  comment: string
++  constant: string
++  entity: string
++  keyword: string
++  storage: string
++  string: string
++  support: string
++  variable: string
++}
++
++export interface Control {
++  borderColor: BorderColor
++}
++
++export interface BorderColor {
++  emphasis: string
++}
++
++export interface Counter {
++  border: string
++}
++
++export interface DiffBlob {
++  addition: Tion
++  deletion: Tion
++  hunk: Hunk
++  expander: Expander
++}
++
++export interface Tion {
++  numText: string
++  fg: string
++  numBg: string
++  lineBg: string
++  wordBg: string
++}
++
++export interface Expander {
++  icon: string
++}
++
++export interface Hunk {
++  numBg: string
++}
++
++export interface Diffstat {
++  deletionBorder: string
++  additionBorder: string
++  additionBg: string
++}
++
++export interface Header {
++  text: string
++  bg: string
++  divider: string
++  logo: string
++}
++
++export interface HeaderSearch {
++  bg: string
++  border: string
++}
++
++export interface Input {
++  disabledBg: string
++}
++
++export interface MarketingIcon {
++  primary: string
++  secondary: string
++}
++
++export interface Menu {
++  bgActive: string
++}
++
++export interface ColorsMktg {
++  btn: ActiveClass
++}
++
++export interface ActiveClass {
++  bg: string
++}
++
++export interface Prettylights {
++  syntax: PrettylightsSyntax
++}
++
++export interface PrettylightsSyntax {
++  comment: string
++  constant: string
++  entity: string
++  storageModifierImport: string
++  entityTag: string
++  keyword: string
++  string: string
++  variable: string
++  brackethighlighterUnmatched: string
++  invalidIllegalText: string
++  invalidIllegalBg: string
++  carriageReturnText: string
++  carriageReturnBg: string
++  stringRegexp: string
++  markupList: string
++  markupHeading: string
++  markupItalic: string
++  markupBold: string
++  markupDeletedText: string
++  markupDeletedBg: string
++  markupInsertedText: string
++  markupInsertedBg: string
++  markupChangedText: string
++  markupChangedBg: string
++  markupIgnoredText: string
++  markupIgnoredBg: string
++  metaDiffRange: string
++  brackethighlighterAngle: string
++  sublimelinterGutterMark: string
++  constantOtherReferenceLink: string
++}
++
++export interface ColorsPrimer {
++  fg: Fg
++  canvas: PrimerCanvas
++  border: PrimerBorder
++}
++
++export interface PrimerBorder {
++  active: string
++  contrast: string
++}
++
++export interface PrimerCanvas {
++  backdrop: string
++  sticky: string
++}
++
++export interface Fg {
++  disabled: string
++}
++
++export interface Project {
++  headerBg: string
++  sidebarBg: string
++  gradientIn: string
++  gradientOut: string
++}
++
++export interface SearchKeyword {
++  hl: string
++}
++
++export interface SegmentedControl {
++  bg: string
++  button: Button
++}
++
++export interface Button {
++  bg: PageHeaderBg
++  hover: ActiveClass
++  active: ActiveClass
++  selected: Counter
++}
++
++export interface SelectMenu {
++  backdropBorder: string
++  tapHighlight: string
++  tapFocusBg: string
++}
++
++export interface Sidenav {
++  selectedBg: string
++}
++
++export interface SwitchKnob {
++  bg: PageHeaderBg
++  border: string
++  disabledBg: string
++  checked?: SwitchKnob
++}
++
++export interface SwitchTrack {
++  bg: string
++  hoverBg: string
++  activeBg: string
++  disabledBg?: string
++  fg: string
++  disabledFg: Inset
++  border: BorderEnum
++  checked?: SwitchTrack
++}
++
++export type BorderEnum = 'rgba(0,0,0,0)'
++
++export interface Timeline {
++  badgeBg: string
++}
++
++export interface TreeViewItem {
++  chevron: Chevron
++  directory: Directory
++}
++
++export interface Chevron {
++  hoverBg: string
++}
++
++export interface Directory {
++  fill: string
++}
++
++export interface Underlinenav {
++  icon: string
++  borderHover: string
++}
++
++export interface Shadows {
++  checks?: ShadowsChecks
++  mktg: ShadowsMktg
++  avatar: ShadowsAvatar
++  overlay: Overlay
++  btn: ShadowsBtn
++  shadow: Sizes
++  primer: ShadowsPrimer
++}
++
++export interface ShadowsAvatar {
++  childShadow: string
++}
++
++export interface ShadowsBtn {
++  shadow: string
++  insetShadow: string
++  primary: FluffyPrimary
++  outline: FluffyDanger
++  danger: FluffyDanger
++}
++
++export interface FluffyDanger {
++  hoverShadow: string
++  hoverInsetShadow: InsetShadow
++  selectedShadow: string
++}
++
++export type InsetShadow =
++  | '0 0 transparent'
++  | 'inset 0 1px 0 rgba(255,255,255,0.03)'
++  | 'inset 0 1px 0 rgba(205,217,229,0.03)'
++
++export interface FluffyPrimary {
++  shadow: string
++  insetShadow: InsetShadow
++  selectedShadow: string
++}
++
++export interface ShadowsChecks {
++  inputShadow: string
++}
++
++export interface ShadowsMktg {
++  btn: PurpleBtn
++}
++
++export interface PurpleBtn {
++  shadow: BtnShadow
++}
++
++export interface BtnShadow {
++  outline: string
++  focus: string
++  hover: string
++  hoverMuted: string
++}
++
++export interface Overlay {
++  shadow: string
++}
++
++export interface ShadowsPrimer {
++  shadow: PrimerShadow
++}
++
++export interface PrimerShadow {
++  highlight: string
++  inset: string
++}
++
++export interface Sizes {
++  small: string
++  medium: string
++  large: string
++  extraLarge?: string
++  xlarge?: string
++}
++
++export interface FontWeights {
++  light: number
++  normal: number
++  semibold: number
++  bold: number
++}
++
++export interface Fonts {
++  normal: string
++  mono: string
++}
++
++export interface LineHeights {
++  condensedUltra: number
++  condensed: number
++  default: number
++}
+diff --git a/src/utils/theme.js b/src/utils/theme.js
+index 16769e95..4990bbae 100644
+--- a/src/utils/theme.js
++++ b/src/utils/theme.js
+@@ -1,10 +1,10 @@
+ // Utility functions used in theme-preval.js
+ // This file needs to be a JavaScript file using CommonJS to be compatible with preval
+ 
+-const isEmpty = require('lodash.isempty')
+-const isObject = require('lodash.isobject')
+-const chroma = require('chroma-js')
++import {isEmpty, isObject} from 'lodash'
++import {valid} from 'chroma-js'
+ 
++/** @param {string[]} fonts */
+ function fontStack(fonts) {
+   return fonts.map(font => (font.includes(' ') ? `"${font}"` : font)).join(', ')
+ }
+@@ -18,7 +18,7 @@ function isShadowValue(value) {
+ }
+ 
+ function isColorValue(value) {
+-  return chroma.valid(value)
++  return valid(value)
+ }
+ 
+ function filterObject(obj, predicate) {
+@@ -49,13 +49,18 @@ function partitionColors(colors) {
+   }
+ }
+ 
++/**
++ * @template T
++ * @param {T} obj
++ * @returns {Omit<T, 'scale'>}
++ */
+ function omitScale(obj) {
+   const {scale, ...rest} = obj
+   return rest
+ }
+ 
+-module.exports = {
+-  fontStack,
++export {
++  fontStack, //
+   isShadowValue,
+   isColorValue,
+   filterObject,
+diff --git a/tsconfig.json b/tsconfig.json
+index 255f9b44..5a94f7d5 100644
+--- a/tsconfig.json
++++ b/tsconfig.json
+@@ -4,7 +4,7 @@
+     "module": "commonjs",
+     "allowJs": true,
+     "checkJs": false,
+-    "jsx": "preserve",
++    "jsx": "react-jsx",
+     "declaration": true,
+     "outDir": "./lib",
+     "strict": true,
